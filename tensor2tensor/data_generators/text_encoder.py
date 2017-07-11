@@ -37,8 +37,6 @@ import tensorflow as tf
 
 # Conversion between Unicode and UTF-8, if required (on Python2)
 native_to_unicode = (lambda s: s.decode("utf-8")) if PY2 else (lambda s: s)
-
-
 unicode_to_native = (lambda s: s.encode("utf-8")) if PY2 else (lambda s: s)
 
 
@@ -46,11 +44,13 @@ unicode_to_native = (lambda s: s.encode("utf-8")) if PY2 else (lambda s: s)
 PAD = "<pad>"
 EOS = "<EOS>"
 RESERVED_TOKENS = [PAD, EOS]
+PAD_TOKEN = RESERVED_TOKENS.index(PAD) # Normally 0
+EOS_TOKEN = RESERVED_TOKENS.index(EOS) # Normally 1
+
 if six.PY2:
   RESERVED_TOKENS_BYTES = RESERVED_TOKENS
 else:
   RESERVED_TOKENS_BYTES = [bytes(PAD, "ascii"), bytes(EOS, "ascii")]
-
 
 class TextEncoder(object):
   """Base class for converting from ints to/from human readable strings."""
@@ -120,7 +120,7 @@ class ByteTextEncoder(TextEncoder):
     if six.PY2:
       return "".join(decoded_ids)
     # Python3: join byte arrays and then decode string
-    return b"".join(decoded_ids).decode("utf-8")
+    return b"".join(decoded_ids).decode("utf-8", "replace")
 
   @property
   def vocab_size(self):
@@ -373,6 +373,8 @@ class SubwordTextEncoder(TextEncoder):
     # We build iteratively.  On each iteration, we segment all the words,
     # then count the resulting potential subtokens, keeping the ones
     # with high enough counts for our new vocabulary.
+    if min_count < 1:
+      min_count = 1
     for i in xrange(num_iterations):
       tf.logging.info("Iteration {0}".format(i))
       counts = defaultdict(int)
