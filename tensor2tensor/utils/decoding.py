@@ -422,8 +422,6 @@ def _interactive_input_fn(hparams):
   p_hparams = hparams.problems[problem_id]
   has_input = "inputs" in p_hparams.input_modality
   vocabulary = p_hparams.vocabulary["inputs" if has_input else "targets"]
-  # This should be longer than the longest input.
-  const_array_size = 10000
   # Import readline if available for command line editing and recall.
   try:
     import readline  # pylint: disable=g-import-not-at-top,unused-variable
@@ -466,15 +464,7 @@ def _interactive_input_fn(hparams):
       input_type = input_string[3:]
     else:
       if input_type == "text":
-        input_ids = vocabulary.encode(input_string)
-        if has_input:
-          input_ids.append(text_encoder.EOS_ID)
-        x = [num_samples, decode_length, len(input_ids)] + input_ids
-        assert len(x) < const_array_size
-        x += [0] * (const_array_size - len(x))
-        yield {
-            "inputs": np.array(x).astype(np.int32),
-        }
+        yield _text_to_input(input_string, vocabulary, has_input, num_samples, decode_length, problem_id)
       elif input_type == "image":
         input_path = input_string
         img = vocabulary.encode(input_path)
@@ -489,6 +479,72 @@ def _interactive_input_fn(hparams):
         }
       else:
         raise Exception("Unsupported input type.")
+
+
+def _text_to_input(input_string, vocabulary, has_input, num_samples, decode_length, problem_id):
+  """ Convert a plain text string to an input dict """
+  input_ids = vocabulary.encode(input_string)
+  if has_input:
+    input_ids.append(text_encoder.EOS_ID)
+  x = [num_samples, decode_length, len(input_ids)] + input_ids
+  # This should be longer than the longest input.
+  MAX_INPUT_SIZE = 10000
+  assert len(x) < MAX_INPUT_SIZE
+  x += [0] * (MAX_INPUT_SIZE - len(x))
+  return {
+      "inputs": np.array(x).astype(np.int32),
+      "problem_choice": np.array(problem_id).astype(np.int32)
+  }
+
+
+def _generator_input_fn(hparams, decode_hp, generator):
+  """Generator that reads text strings from the given generator
+  and yields "interactive inputs".
+
+  Args:
+    hparams: model hparams
+    generator: generator that yields text strings to decode
+  Yields:
+    numpy arrays
+
+  Raises:
+    Exception: when `input_type` is invalid.
+  """
+  num_samples = 1
+  decode_length = 100
+  problem_id = decode_hp.problem_idx
+  p_hparams = hparams.problems[problem_id]
+  has_input = "inputs" in p_hparams.input_modality
+  vocabulary = p_hparams.vocabulary["inputs" if has_input else "targets"]
+  for input_string in iter(generator):
+    yield _text_to_input(input_string, vocabulary, has_input, num_samples, decode_length, problem_id)
+
+
+def decode_from_text_generator(estimator, decode_hp, generator):
+  """Decoding from a generator of text strings."""
+  hparams = estimator.params
+
+  def input_fn():
+    gen_fn = make_input_fn_from_generator(_generator_input_fn(hparams, decode_hp, generator))
+    example = gen_fn()
+    example = _interactive_input_tensor_to_features_dict(example, hparams)
+    return example
+
+  result_iter = estimator.predict(input_fn)
+  for result in result_iter:
+    problem_idx = result["problem_choice"]
+    targets_vocab = hparams.problems[problem_idx].vocabulary["targets"]
+    yield targets_vocab.decode(_save_until_eos(result["outputs"], False))
+
+
+def read_image(path):
+  try:
+    import matplotlib.image as im  # pylint: disable=g-import-not-at-top
+  except ImportError as e:
+    tf.logging.warning(
+        "Reading an image requires matplotlib to be installed: %s", e)
+    raise NotImplementedError("Image reading not implemented.")
+  return im.imread(path)
 
 
 def show_and_save_image(img, save_path):
