@@ -17,8 +17,6 @@ flags.DEFINE_string("decode_to_file", None,
                     "Path prefix to inference output file")
 flags.DEFINE_bool("decode_interactive", False,
                   "Interactive local inference mode.")
-flags.DEFINE_bool("decode_server", False,
-                  "Local inference from text generator.")
 flags.DEFINE_integer("decode_shards", 1, "Number of decoding replicas.")
 flags.DEFINE_string("t2t_usr_dir", "",
                     "Path to a Python module that will be imported. The "
@@ -52,18 +50,7 @@ def main(_):
   decode_hp = decoding.decode_hparams(FLAGS.decode_hparams)
   decode_hp.add_hparam("shards", FLAGS.decode_shards)
   decode_hp.add_hparam("shard_id", FLAGS.worker_id)
-  if FLAGS.decode_server:
-    def input_generator():
-      TEXT = [
-        "Margir voru ósáttir við að Katrín Jakobsdóttir myndaði ríkisstjórn með Sjálfstæðisflokknum ."
-      ]
-      for txt in TEXT:
-        yield txt
-    output_generator = decoding.decode_from_text_generator(
-        estimator, decode_hp, input_generator())
-    for output in output_generator:
-      print(output)
-  elif FLAGS.decode_interactive:
+  if FLAGS.decode_interactive:
     decoding.decode_interactively(estimator, decode_hp)
   elif FLAGS.decode_from_file:
     decoding.decode_from_file(estimator, FLAGS.decode_from_file, decode_hp,

@@ -313,18 +313,18 @@ def make_input_fn_from_generator(gen):
   flattened = tf.contrib.framework.nest.flatten(first_ex)
   types = [t.dtype for t in flattened]
   shapes = [[None] * len(t.shape) for t in flattened]
-  first_ex_list = [first_ex]
+  first_ex_list = [flattened]
 
   def py_func():
     if first_ex_list:
-      example = first_ex_list.pop()
-    else:
-      example = six.next(gen)
+      return first_ex_list.pop()
+    example = six.next(gen)
     return tf.contrib.framework.nest.flatten(example)
 
   def input_fn():
     flat_example = tf.py_func(py_func, [], types)
-    _ = [t.set_shape(shape) for t, shape in zip(flat_example, shapes)]
+    for t, shape in zip(flat_example, shapes):
+      t.set_shape(shape)
     example = tf.contrib.framework.nest.pack_sequence_as(first_ex, flat_example)
     return example
 
@@ -463,6 +463,7 @@ def _interactive_input_fn(hparams):
     elif input_string[:3] == "it=":
       input_type = input_string[3:]
     else:
+      # Decode user-entered input
       if input_type == "text":
         yield _text_to_input(input_string, vocabulary, has_input, num_samples, decode_length, problem_id)
       elif input_type == "image":
@@ -497,13 +498,13 @@ def _text_to_input(input_string, vocabulary, has_input, num_samples, decode_leng
   }
 
 
-def _generator_input_fn(hparams, decode_hp, generator):
+def _generator_input_fn(hparams, decode_hp, gen):
   """Generator that reads text strings from the given generator
   and yields "interactive inputs".
 
   Args:
     hparams: model hparams
-    generator: generator that yields text strings to decode
+    gen: gen that yields text strings to decode
   Yields:
     numpy arrays
 
@@ -516,25 +517,91 @@ def _generator_input_fn(hparams, decode_hp, generator):
   p_hparams = hparams.problems[problem_id]
   has_input = "inputs" in p_hparams.input_modality
   vocabulary = p_hparams.vocabulary["inputs" if has_input else "targets"]
-  for input_string in iter(generator):
+  for input_string in gen:
     yield _text_to_input(input_string, vocabulary, has_input, num_samples, decode_length, problem_id)
 
 
-def decode_from_text_generator(estimator, decode_hp, generator):
+def decode_from_text_generator(estimator, decode_hp, gen):
   """Decoding from a generator of text strings."""
   hparams = estimator.params
+  gen_fn = make_input_fn_from_generator(_generator_input_fn(hparams, decode_hp, gen))
 
   def input_fn():
-    gen_fn = make_input_fn_from_generator(_generator_input_fn(hparams, decode_hp, generator))
-    example = gen_fn()
-    example = _interactive_input_tensor_to_features_dict(example, hparams)
-    return example
+    return _interactive_input_tensor_to_features_dict(gen_fn(), hparams)
 
   result_iter = estimator.predict(input_fn)
   for result in result_iter:
     problem_idx = result["problem_choice"]
     targets_vocab = hparams.problems[problem_idx].vocabulary["targets"]
     yield targets_vocab.decode(_save_until_eos(result["outputs"], False))
+
+
+class TextDecoder:
+
+  def __init__(self, estimator, decode_hp):
+    self._estimator = estimator
+    self._hparams = estimator.params
+    self._decode_hp = decode_hp
+    self._problem_idx = decode_hp.problem_idx
+    self._p_hparams = self._hparams.problems[self._problem_idx]
+    self._has_input = "inputs" in self._p_hparams.input_modality
+    self._vocab = self._p_hparams.vocabulary["inputs" if self._has_input else "targets"]
+    self._input_generator = None
+
+  def _init_generator(self):
+
+    def copy_generator():
+      while True:
+        obj = yield
+        yield obj
+
+    self._copy_generator = copy_generator()
+    self._copy_generator.send(None)
+
+    def generator_input_fn():
+      """Generator that reads text strings from the given generator
+      and yields "interactive inputs".
+
+      Args:
+        hparams: model hparams
+        gen: gen that yields text strings to decode
+      Yields:
+        numpy arrays
+
+      Raises:
+        Exception: when `input_type` is invalid.
+      """
+      num_samples = 1
+      decode_length = 100
+      for input_string in self._copy_generator:
+        yield _text_to_input(input_string, self._vocab, self._has_input, num_samples,
+            decode_length, self._problem_idx)
+
+    def input_fn():
+      gen_fn = make_input_fn_from_generator(generator_input_fn())
+      example = gen_fn()
+      example = _interactive_input_tensor_to_features_dict(example, self._hparams)
+      return example
+
+    def input_generator():
+
+      output_generator = self._estimator.predict(input_fn)
+
+      while True:
+        text = yield
+        if text:
+          self._copy_generator.send(text)
+          yield six.next(output_generator)
+
+    self._input_generator = input_generator()
+    self._input_generator.send(None)
+
+  def decode(self, text):
+    if self._input_generator is None:
+      self._init_generator()
+    self._input_generator.send(text)
+    result = six.next(self._input_generator)
+    return self._vocab.decode(_save_until_eos(result["outputs"], False))
 
 
 def read_image(path):
@@ -621,7 +688,7 @@ def _interactive_input_tensor_to_features_dict(feature_map, hparams):
     a features dictionary, as expected by the decoder.
   """
   inputs = tf.convert_to_tensor(feature_map["inputs"])
-  input_is_image = False if len(inputs.get_shape()) < 3 else True
+  input_is_image = len(inputs.get_shape()) >= 3
 
   def input_fn(problem_choice, x=inputs):  # pylint: disable=missing-docstring
     if input_is_image:
@@ -639,15 +706,16 @@ def _interactive_input_tensor_to_features_dict(feature_map, hparams):
       x = tf.tile(x, tf.to_int32([num_samples, 1, 1, 1]))
 
     p_hparams = hparams.problems[problem_choice]
-    return (tf.constant(p_hparams.input_space_id), tf.constant(
-        p_hparams.target_space_id), x)
+    return (
+        tf.constant(p_hparams.input_space_id),
+        tf.constant(p_hparams.target_space_id),
+        x)
 
   input_space_id, target_space_id, x = cond_on_index(
       input_fn, feature_map["problem_choice"], len(hparams.problems) - 1)
 
   features = {}
-  features["problem_choice"] = tf.convert_to_tensor(
-      feature_map["problem_choice"])
+  features["problem_choice"] = feature_map["problem_choice"]
   features["input_space_id"] = input_space_id
   features["target_space_id"] = target_space_id
   features["decode_length"] = (
@@ -668,15 +736,16 @@ def _decode_input_tensor_to_features_dict(feature_map, hparams):
     a features dictionary, as expected by the decoder.
   """
   inputs = tf.convert_to_tensor(feature_map["inputs"])
-  input_is_image = False
 
   def input_fn(problem_choice, x=inputs):  # pylint: disable=missing-docstring
     p_hparams = hparams.problems[problem_choice]
     # Add a third empty dimension
     x = tf.expand_dims(x, axis=[2])
     x = tf.to_int32(x)
-    return (tf.constant(p_hparams.input_space_id), tf.constant(
-        p_hparams.target_space_id), x)
+    return (
+        tf.constant(p_hparams.input_space_id),
+        tf.constant(p_hparams.target_space_id),
+        x)
 
   input_space_id, target_space_id, x = cond_on_index(
       input_fn, feature_map["problem_choice"], len(hparams.problems) - 1)
@@ -685,8 +754,7 @@ def _decode_input_tensor_to_features_dict(feature_map, hparams):
   features["problem_choice"] = feature_map["problem_choice"]
   features["input_space_id"] = input_space_id
   features["target_space_id"] = target_space_id
-  features["decode_length"] = (
-      IMAGE_DECODE_LENGTH if input_is_image else tf.shape(x)[1] + 50)
+  features["decode_length"] = tf.shape(x)[1] + 50
   features["inputs"] = x
   return features
 
