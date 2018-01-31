@@ -66,7 +66,8 @@ def tabbed_parsing_character_generator(tmp_dir, train):
 
 @registry.register_problem
 class ParsingIcelandic16k(problem.Problem):
-  """Problem spec for parsing tokenized Icelandic text to constituency trees."""
+  """Problem spec for parsing tokenized Icelandic text to constituency trees
+    using a 16k source vocabulary."""
 
   @property
   def source_vocab_size(self):
@@ -83,6 +84,10 @@ class ParsingIcelandic16k(problem.Problem):
   @property
   def target_space_id(self):
     return problem.SpaceID.ICE_PARSE_TOK
+
+  @property
+  def batch_size_means_tokens(self):
+    return True
 
   @property
   def num_shards(self):
@@ -120,3 +125,14 @@ class ParsingIcelandic16k(problem.Problem):
     p.input_space_id = self.input_space_id
     p.target_space_id = self.target_space_id
     p.loss_multiplier = 2.5  # Rough estimate of avg number of tokens per word
+
+
+@registry.register_problem
+class ParsingIcelandic32k(ParsingIcelandic16k):
+  """Problem spec for parsing tokenized Icelandic text to constituency trees
+    using a 32k source vocabulary."""
+
+  @property
+  def source_vocab_size(self):
+    return 2**15  # 32768
+

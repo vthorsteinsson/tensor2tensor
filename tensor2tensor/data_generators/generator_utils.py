@@ -373,7 +373,8 @@ def get_or_generate_tabbed_vocab(data_dir, tmp_dir, source_filename,
 
   The source is a file of source, target pairs, where each line contains
   a source string and a target string, separated by a tab ('\t') character.
-  The index parameter specifies 0 for the source or 1 for the target.
+  The index parameter specifies 0 for the source or 1 for the target,
+  or None for both.
 
   Args:
     data_dir: path to the data directory.
@@ -394,8 +395,14 @@ def get_or_generate_tabbed_vocab(data_dir, tmp_dir, source_filename,
         line = line.strip()
         if line and "\t" in line:
           parts = line.split("\t", 1)
-          part = parts[index].strip()
-          yield part
+          if index is None:
+            # Yield both the source and target strings
+            yield parts[0].strip()
+            yield parts[1].strip()
+          else:
+            # Yield only the source (0) or target (1), depending on index
+            part = parts[index].strip()
+            yield part
 
   return get_or_generate_vocab_inner(data_dir, vocab_filename, vocab_size,
                                      generate())
